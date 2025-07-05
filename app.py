@@ -143,6 +143,31 @@ def calculate_btst_metrics(hist):
         'BTST Score': btst_score
     }
 
+# NEW: Calculate BTST-specific stop loss and target
+def calculate_btst_risk_management(latest, prev_day, atr):
+    # Base stop loss and target on ATR
+    stop_loss = round(latest['Close'] - atr * 1.5, 2)
+    target = round(latest['Close'] + atr * 3, 2)
+    
+    # Adjust based on intraday range
+    intraday_range = latest['High'] - latest['Low']
+    if intraday_range > 0:
+        # Tighten stop loss for volatile stocks
+        stop_loss = max(stop_loss, round(latest['Close'] - intraday_range * 0.75, 2))
+        
+        # Adjust target based on close position relative to high
+        close_position = (latest['Close'] - latest['Low']) / intraday_range
+        if close_position > 0.8:  # Closed near high
+            target = round(latest['Close'] + intraday_range * 1.5, 2)
+    
+    # Ensure target is at least 1.5x risk
+    risk = latest['Close'] - stop_loss
+    reward = target - latest['Close']
+    if reward < risk * 1.5:
+        target = round(latest['Close'] + risk * 2.0, 2)
+    
+    return stop_loss, target
+
 def analyze_stock(symbol):
     try:
         # Get data
@@ -250,9 +275,11 @@ def analyze_stock(symbol):
                 confidence -= 10
         
         # NEW: 8. BTST Strategy Scoring
+        btst_signal = False
         if btst_metrics and btst_metrics['BTST Score'] > 75:
             models_used['BTST'] = {'signal': 'Bullish', 'confidence': 30}
             confidence += 30
+            btst_signal = True
             # Override recommendation if BTST score is high
             if primary_signal == "Neutral" and confidence > 60:
                 primary_signal = "BTST Buy"
@@ -266,15 +293,18 @@ def analyze_stock(symbol):
             recommendation = "Neutral"
             
         # Special case for BTST recommendations
-        if btst_metrics and btst_metrics['BTST Score'] > 75:
+        if btst_signal:
             recommendation = "BTST Buy"
         
         # Calculate stop loss and target if not set by primary signal
         if stop_loss is None and recommendation != "Neutral":
-            if recommendation == "Buy" or recommendation == "BTST Buy":
+            if recommendation == "Buy":
                 stop_loss = round(latest['Close'] - atr * 1.5, 2)
                 target = round(latest['Close'] + atr * 3, 2)
-            else:
+            elif recommendation == "BTST Buy":
+                # NEW: Use specialized BTST risk management
+                stop_loss, target = calculate_btst_risk_management(latest, prev_day, atr)
+            else:  # Sell
                 stop_loss = round(latest['Close'] + atr * 1.5, 2)
                 target = round(latest['Close'] - atr * 3, 2)
         
@@ -398,14 +428,23 @@ def main():
             # BTST Opportunities Section
             st.subheader("🔥 BTST Opportunities (Buy Today, Sell Tomorrow)")
             if not btst_df.empty:
-                btst_cols = ['Symbol', 'Current Price', 'BTST Score', 'Price Change (%)', 
-                           'Close Near High (%)', 'Intraday Range (%)', 'Volume Spike', 
-                           'Close > Prev High', 'Recommendation', 'Confidence (%)']
+                # NEW: Added Stop Loss and Target to BTST table
+                btst_cols = ['Symbol', 'Current Price', 'BTST Score', 'Stop Loss', 'Target', 
+                           'Price Change (%)', 'Close Near High (%)', 'Intraday Range (%)', 
+                           'Volume Spike', 'Close > Prev High', 'Confidence (%)']
                 
                 st.dataframe(
                     btst_df[btst_cols].sort_values('BTST Score', ascending=False),
                     height=min(400, 45 * len(btst_df))
                 )
+                
+                # NEW: Calculate and display risk-reward ratio
+                btst_df['Risk'] = btst_df['Current Price'] - btst_df['Stop Loss']
+                btst_df['Reward'] = btst_df['Target'] - btst_df['Current Price']
+                btst_df['Risk-Reward'] = btst_df['Reward'] / btst_df['Risk']
+                
+                avg_risk_reward = btst_df['Risk-Reward'].mean()
+                st.metric("Average Risk-Reward Ratio", f"{avg_risk_reward:.2f}:1")
                 
                 # BTST Strategy Explanation
                 with st.expander("ℹ️ About BTST Strategy"):
@@ -417,10 +456,10 @@ def main():
                     4. **Volume Spike**: Today's volume vs 20-day average
                     5. **Intraday Range (%)**: (High - Low)/Open * 100 (volatility)
                     
-                    **Scoring:**
-                    - Each criterion contributes up to 25 points
-                    - Total score out of 100
-                    - Scores > 75 indicate strong BTST opportunities
+                    **Risk Management:**
+                    - Stop Loss: Below today's low or based on volatility (ATR)
+                    - Target: 2-3x risk or based on intraday range
+                    - Minimum Risk-Reward: 1.5:1
                     """)
             else:
                 st.info("No strong BTST opportunities found based on current criteria.")
